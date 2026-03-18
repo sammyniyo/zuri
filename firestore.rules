@@ -1,0 +1,90 @@
+rules_version = '2';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ZURI — Firestore Security Rules
+// ─────────────────────────────────────────────────────────────────────────────
+// To deploy these rules:
+//   firebase deploy --only firestore:rules
+// ─────────────────────────────────────────────────────────────────────────────
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper functions ─────────────────────────────────────────────────────
+
+    /// Check if the request comes from a signed-in user
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    /// Check if the request is from the owner of a document
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    /// Check if a user document exists and has isPro = true
+    function isPro() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isPro == true;
+    }
+
+    // ── Places ───────────────────────────────────────────────────────────────
+    // Everyone can read places (browse without login)
+    // Only server-side / admin can write (use Firebase Admin SDK or console)
+
+    match /places/{placeId} {
+      allow read: if true;         // Public — browse without login
+      allow create: if false;      // Admin only (use Firebase Console or seeder)
+      allow update: if false;      // Admin only
+      allow delete: if false;      // Admin only
+
+      // ── Reviews (subcollection) ───────────────────────────────────────────
+      // Anyone can read reviews
+      // Only authenticated Pro users can write reviews
+
+      match /reviews/{reviewId} {
+        allow read: if true;
+
+        // Create: must be signed in, Pro, and the userId must match auth uid
+        allow create: if isSignedIn()
+          && isPro()
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.rating >= 1
+          && request.resource.data.rating <= 5
+          && request.resource.data.text.size() >= 10
+          && request.resource.data.text.size() <= 500;
+
+        // Update / Delete: only the review owner
+        allow update, delete: if isOwner(resource.data.userId);
+      }
+    }
+
+    // ── Users ────────────────────────────────────────────────────────────────
+    // Users can only read and write their own document
+
+    match /users/{uid} {
+      // Read own document only
+      allow read: if isOwner(uid);
+
+      // Create own document on first login
+      allow create: if isOwner(uid)
+        && request.resource.data.id == uid;
+
+      // Update own document (except isPro — that's set by payment webhook)
+      allow update: if isOwner(uid)
+        && !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['isPro', 'proExpiresAt']);
+
+      allow delete: if false;
+    }
+
+    // ── Admin (optional future use) ──────────────────────────────────────────
+    // Reserved for future admin panel — no public access
+
+    match /admin/{document=**} {
+      allow read, write: if false;
+    }
+
+  }
+}
